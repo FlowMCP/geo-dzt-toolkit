@@ -1,0 +1,19 @@
+{
+    "name": "geo-dzt-toolkit",
+    "version": "0.1.0",
+    "description": "Live-query geo add-on for the DZT Knowledge Graph (Open Data Germany). Emits RFC 7946 FeatureCollections (lon-first) via SPARQL bbox-FILTER + Haversine. Radius is emulated client-side (no GeoSPARQL).",
+    "type": "module",
+    "main": "src/index.mjs",
+    "scripts": {
+        "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests",
+        "test:coverage:src": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage --passWithNoTests",
+        "test:live": "node tests/integration/live-dzt.mjs"
+    },
+    "keywords": [ "geo", "dzt", "open-data-germany", "knowledge-graph", "sparql", "flowmcp", "tourism" ],
+    "license": "MIT",
+    "engines": { "node": ">=22" },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "jest": "^29.7.0"
+    }
+}
