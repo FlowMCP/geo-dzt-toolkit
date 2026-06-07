@@ -29,5 +29,7 @@ jobs:
         with:
           use_oidc: true
           files: ./coverage/lcov.info
-          fail_ci_if_error: true
+          # non-blocking until this repo is enabled on Codecov; tests still gate CI.
+          # flip back to true once Codecov OIDC is configured for FlowMCP/geo-dzt-toolkit.
+          fail_ci_if_error: false
           flags: unittests
