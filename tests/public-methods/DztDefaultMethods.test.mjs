@@ -18,7 +18,7 @@ describe( 'DztDefaultMethods', () => {
 
     test( 'getAllMethods returns the catalog', () => {
         const names = DztDefaultMethods.getAllMethods().map( ( m ) => m.name )
-        expect( names ).toEqual( expect.arrayContaining( [ 'nearPoint', 'inBoundingBox', 'byType', 'searchByName', 'rawSparql' ] ) )
+        expect( names ).toEqual( expect.arrayContaining( [ 'nearPoint', 'inBoundingBox', 'byType', 'getTrails', 'searchByName', 'rawSparql' ] ) )
     } )
 
     test( 'searchByName returns de-duplicated non-geo results with collected types', async () => {
@@ -79,5 +79,53 @@ describe( 'DztDefaultMethods', () => {
         const result = await DztDefaultMethods.rawSparql( { query: 'SELECT * WHERE { ?s ?p ?o }' } )
         expect( result.bindings ).toHaveLength( 1 )
         expect( result.metadata.source ).toBe( 'dzt' )
+    } )
+
+    const configureRaw = ( { rows } ) => {
+        DztClient.configure( { apiKey: 'k', minIntervalMs: 0, fetchImpl: async () => ( {
+            status: 200, json: async () => ( { results: { bindings: rows } } )
+        } ) } )
+    }
+
+    test( 'getTrails returns a LineString FeatureCollection from line bindings', async () => {
+        configureRaw( { rows: [ {
+            s: { type: 'uri', value: 'urn:trail' },
+            name: { value: 'Gartenparadies-Runde', 'xml:lang': 'de' },
+            line: { value: '10.100398,48.222792,0 10.100721,48.222787,0 10.101000,48.222800,0' }
+        } ] } )
+        const fc = await DztDefaultMethods.getTrails( { name: 'Runde', limit: 5 } )
+        expect( fc.type ).toBe( 'FeatureCollection' )
+        expect( fc.features ).toHaveLength( 1 )
+        expect( fc.features[ 0 ].geometry.type ).toBe( 'LineString' )
+        expect( fc.features[ 0 ].properties._vertexCount ).toBe( 3 )
+        expect( fc.features[ 0 ].properties.type ).toEqual( [ 'Trail' ] )
+    } )
+
+    test( 'getTrails throws without a positive limit (no silent default)', async () => {
+        configureRaw( { rows: [] } )
+        await expect( DztDefaultMethods.getTrails( { name: 'Runde' } ) ).rejects.toThrow( 'DDM-002' )
+    } )
+
+    test( 'nearPoint enrich:[transit] passes a _nearestTransitStop through', async () => {
+        configureRaw( { rows: [ {
+            s: { type: 'uri', value: 'near' },
+            lat: { value: '48.1380' }, lon: { value: '11.5755' },
+            name: { value: 'Kunstraum' },
+            dhid: { value: 'de:09162:142' },
+            walkDist: { datatype: 'http://www.w3.org/2001/XMLSchema#double', value: '726.0' }
+        } ] } )
+        const fc = await DztDefaultMethods.nearPoint( { lat: 48.1374, lon: 11.5755, radiusMeters: 2000, enrich: [ 'transit' ], limit: 10 } )
+        expect( fc.features ).toHaveLength( 1 )
+        expect( fc.features[ 0 ].properties._nearestTransitStop ).toEqual( { dhid: 'de:09162:142', walkingDistance: 726 } )
+    } )
+
+    test( 'nearPoint rejects an unknown enrich token', async () => {
+        configureRaw( { rows: [] } )
+        await expect( DztDefaultMethods.nearPoint( { lat: 48, lon: 11, radiusMeters: 1000, enrich: [ 'bogus' ] } ) ).rejects.toThrow( 'DDM-ENRICH-002' )
+    } )
+
+    test( 'byType passes enrich through and rejects bogus tokens', async () => {
+        configureRaw( { rows: [] } )
+        await expect( DztDefaultMethods.byType( { lat: 48, lon: 11, radiusMeters: 1000, types: [ 'TouristAttraction' ], enrich: [ 'bogus' ] } ) ).rejects.toThrow( 'DDM-ENRICH-002' )
     } )
 } )

@@ -32,11 +32,12 @@ export class DztSparqlBuilder {
     }
 
 
-    static buildBboxQuery( { minLat, maxLat, minLon, maxLon, types = null, limit } ) {
+    static buildBboxQuery( { minLat, maxLat, minLon, maxLon, types = null, enrich = null, limit } ) {
         if( typeof limit !== 'number' || limit <= 0 ) {
             throw new Error( 'DZT-SPARQL-002: limit must be a positive number (no silent default)' )
         }
         const hasTypes = Array.isArray( types ) && types.length > 0
+        const wantsTransit = DztSparqlBuilder.#wantsTransit( { enrich } )
         const fLatMin = DztSparqlBuilder.#num( { value: minLat } )
         const fLatMax = DztSparqlBuilder.#num( { value: maxLat } )
         const fLonMin = DztSparqlBuilder.#num( { value: minLon } )
@@ -46,21 +47,42 @@ export class DztSparqlBuilder {
         // OPTIONAL (a multi-valued cross-product). When `types` is given we add a
         // VALUES set + a REQUIRED `?s a ?type` join, which both restricts and
         // populates the type — cheaper than an unbounded OPTIONAL.
-        const selectVars = hasTypes ? '?s ?name ?lat ?lon ?type ?licence' : '?s ?name ?lat ?lon ?licence'
+        const baseVars = hasTypes ? '?s ?name ?lat ?lon ?type ?licence' : '?s ?name ?lat ?lon ?licence'
+        // Transit enrich (PRD-002): a reified odta:GeoLinkObject links a POI
+        // (?s = linkTarget) to a transit stop (linkSource) carrying the DHID via
+        // schema:identifier, plus a precomputed walking distance reified one level
+        // deeper (walkingDistance -> GeoLinkObjectDistance -> schema:value). The
+        // whole block is OPTIONAL so the lean default path is untouched and POIs
+        // without a GeoLink still come through. A POI can carry MANY GeoLinks; we
+        // surface all matching rows here and let the normalizer pick the nearest.
+        const selectVars = wantsTransit ? `${baseVars} ?dhid ?walkDist` : baseVars
         const typeLines = hasTypes
             ? [ `  VALUES ?type { ${types.map( ( t ) => `schema:${t}` ).join( ' ' )} }`, '  ?s a ?type .' ]
             : []
+        const enrichLines = wantsTransit
+            ? [
+                '  OPTIONAL {',
+                '    ?glo a odta:GeoLinkObject ; odta:linkTarget ?s ; odta:linkSource ?stop ; odta:walkingDistance ?wd .',
+                '    ?stop schema:identifier ?dhid .',
+                '    ?wd schema:value ?walkDist .',
+                '  }'
+            ]
+            : []
+        const prefixLines = wantsTransit
+            ? [ 'PREFIX schema: <https://schema.org/>', 'PREFIX odta: <https://odta.io/voc/>' ]
+            : [ 'PREFIX schema: <https://schema.org/>' ]
         // lat/lon are stored as xsd:double literals, so compare directly against
         // numeric literals — casting every triple with xsd:double() is what makes
         // the (unindexed) FILTER scan blow past the gateway timeout.
         const sparql = [
-            'PREFIX schema: <https://schema.org/>',
+            ...prefixLines,
             `SELECT ${selectVars} WHERE {`,
             '  ?s schema:geo ?g .',
             '  ?g schema:latitude ?lat ; schema:longitude ?lon .',
             '  OPTIONAL { ?s schema:name ?name }',
             '  OPTIONAL { ?s schema:license ?licence }',
             ...typeLines,
+            ...enrichLines,
             `  FILTER( ?lat >= ${fLatMin} && ?lat <= ${fLatMax}`,
             `       && ?lon >= ${fLonMin} && ?lon <= ${fLonMax} )`,
             '}',
@@ -69,6 +91,60 @@ export class DztSparqlBuilder {
             .filter( ( line ) => line.length > 0 )
             .join( '\n' )
         return { sparql }
+    }
+
+
+    static buildTrailQuery( { name = null, limit } ) {
+        if( typeof limit !== 'number' || limit <= 0 ) {
+            throw new Error( 'DZT-SPARQL-002: limit must be a positive number (no silent default)' )
+        }
+        const hasName = name !== undefined && name !== null
+        if( hasName && ( typeof name !== 'string' || name.trim().length === 0 ) ) {
+            throw new Error( 'DZT-SPARQL-004: name, when given, must be a non-empty string' )
+        }
+        // NAMESPACE TRAP (verified live): a route is a `odta:Trail` (odta: =
+        // https://odta.io/voc/), NOT `schema:Trail` (which yields 0). The route
+        // geometry hangs off schema:geo -> schema:line, ONE whitespace-separated
+        // string of `lon,lat,elev` triples (lon-first, elev always 0). The query
+        // is anchored on `?s a odta:Trail` and always bounded with a LIMIT (no
+        // spatial index -> unbounded scans time out, HTTP 524).
+        const nameLines = hasName
+            ? [ `  FILTER( CONTAINS( LCASE( STR( ?name ) ), "${DztSparqlBuilder.#escapeLiteral( { value: name.trim().toLowerCase() } )}" ) )` ]
+            : []
+        const sparql = [
+            'PREFIX schema: <https://schema.org/>',
+            'PREFIX odta: <https://odta.io/voc/>',
+            'SELECT ?s ?name ?line ?licence WHERE {',
+            '  ?s a odta:Trail .',
+            '  ?s schema:geo ?g .',
+            '  ?g schema:line ?line .',
+            '  OPTIONAL { ?s schema:name ?name }',
+            '  OPTIONAL { ?s schema:license ?licence }',
+            ...nameLines,
+            '}',
+            `LIMIT ${Math.floor( limit )}`
+        ]
+            .filter( ( line ) => line.length > 0 )
+            .join( '\n' )
+        return { sparql }
+    }
+
+
+    static #wantsTransit( { enrich } ) {
+        if( enrich === undefined || enrich === null ) { return false }
+        const list = DztSparqlBuilder.#normalizeEnrich( { enrich } )
+        return list.includes( 'transit' )
+    }
+
+
+    static #normalizeEnrich( { enrich } ) {
+        if( Array.isArray( enrich ) ) {
+            return enrich.map( ( token ) => String( token ).trim() ).filter( ( token ) => token.length > 0 )
+        }
+        if( typeof enrich === 'string' ) {
+            return enrich.split( ',' ).map( ( token ) => token.trim() ).filter( ( token ) => token.length > 0 )
+        }
+        return []
     }
 
 

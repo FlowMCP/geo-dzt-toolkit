@@ -1,6 +1,7 @@
 // geo-dzt-toolkit — live-query geo add-on for the DZT Knowledge Graph (Open Data Germany).
 
 export { Validation } from './shared/Validation.mjs'
+export { CoverageContract } from './shared/CoverageContract.mjs'
 
 export { DztClient } from './converters/dzt/DztClient.mjs'
 export { DztSparqlBuilder } from './converters/dzt/DztSparqlBuilder.mjs'

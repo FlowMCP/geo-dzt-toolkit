@@ -74,3 +74,56 @@ describe( 'DztSparqlBuilder.buildNameQuery', () => {
         expect( sparql ).toContain( '\\"' )
     } )
 } )
+
+
+describe( 'DztSparqlBuilder.buildBboxQuery transit enrich', () => {
+    const bbox = { minLat: 47.9, maxLat: 48.1, minLon: 10.9, maxLon: 11.1 }
+
+    test( 'omits the GeoLinkObject join when no enrich requested (lean default)', () => {
+        const { sparql } = DztSparqlBuilder.buildBboxQuery( { ...bbox, limit: 20 } )
+        expect( sparql ).not.toContain( 'GeoLinkObject' )
+        expect( sparql ).not.toContain( '?dhid' )
+        expect( sparql ).not.toContain( 'PREFIX odta:' )
+    } )
+
+    test( 'adds an OPTIONAL GeoLinkObject join with DHID + walk distance on enrich:transit', () => {
+        const { sparql } = DztSparqlBuilder.buildBboxQuery( { ...bbox, enrich: [ 'transit' ], limit: 20 } )
+        expect( sparql ).toContain( 'PREFIX odta: <https://odta.io/voc/>' )
+        expect( sparql ).toContain( 'odta:GeoLinkObject' )
+        expect( sparql ).toContain( 'odta:linkTarget ?s' )
+        expect( sparql ).toContain( 'odta:linkSource ?stop' )
+        expect( sparql ).toContain( '?stop schema:identifier ?dhid' )
+        expect( sparql ).toContain( '?walkDist' )
+        expect( sparql ).toContain( 'OPTIONAL {' )
+    } )
+
+    test( 'accepts a comma-separated enrich string', () => {
+        const { sparql } = DztSparqlBuilder.buildBboxQuery( { ...bbox, enrich: 'transit', limit: 20 } )
+        expect( sparql ).toContain( 'odta:GeoLinkObject' )
+    } )
+} )
+
+
+describe( 'DztSparqlBuilder.buildTrailQuery', () => {
+    test( 'requires a positive limit (no silent default)', () => {
+        expect( () => DztSparqlBuilder.buildTrailQuery( { limit: 0 } ) ).toThrow( 'DZT-SPARQL-002' )
+    } )
+
+    test( 'anchors on odta:Trail with schema:line and a LIMIT', () => {
+        const { sparql } = DztSparqlBuilder.buildTrailQuery( { limit: 5 } )
+        expect( sparql ).toContain( 'PREFIX odta: <https://odta.io/voc/>' )
+        expect( sparql ).toContain( '?s a odta:Trail' )
+        expect( sparql ).toContain( 'schema:line ?line' )
+        expect( sparql ).toContain( 'LIMIT 5' )
+        expect( sparql ).not.toContain( 'schema:Trail' )
+    } )
+
+    test( 'adds a name CONTAINS filter when name is given', () => {
+        const { sparql } = DztSparqlBuilder.buildTrailQuery( { name: 'Runde', limit: 5 } )
+        expect( sparql ).toContain( 'CONTAINS( LCASE( STR( ?name ) ), "runde" )' )
+    } )
+
+    test( 'rejects an empty name', () => {
+        expect( () => DztSparqlBuilder.buildTrailQuery( { name: '  ', limit: 5 } ) ).toThrow( 'DZT-SPARQL-004' )
+    } )
+} )

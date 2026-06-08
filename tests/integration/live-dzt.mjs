@@ -43,7 +43,34 @@ const run = async () => {
     // 3) adapter tool definitions.
     const { tools } = FlowMcpAdapter.buildToolDefinitions( { namespace: 'dzt' } )
     if( !tools.find( ( t ) => t.name === 'dzt.nearPoint' ) ) { fail( 'adapter missing dzt.nearPoint tool' ) }
+    if( !tools.find( ( t ) => t.name === 'dzt.getTrails' ) ) { fail( 'adapter missing dzt.getTrails tool' ) }
     ok( `adapter built ${tools.length} tool definitions` )
+
+    // 4) getTrails (PRD-001) — a real odta:Trail route as a GeoJSON LineString.
+    //    "Gartenparadies-Runde" is a verified multi-vertex trail (>= 290 vertices).
+    const trails = await DztDefaultMethods.getTrails( { name: 'Gartenparadies-Runde', limit: 3 } )
+    if( trails.type !== 'FeatureCollection' ) { fail( 'getTrails did not return a FeatureCollection' ) }
+    if( !Array.isArray( trails.features ) || trails.features.length === 0 ) { fail( 'getTrails returned no trail features' ) }
+    const trail = trails.features[ 0 ]
+    if( trail.geometry.type !== 'LineString' ) { fail( 'trail geometry is not a LineString' ) }
+    const vertexCount = trail.properties._vertexCount
+    if( typeof vertexCount !== 'number' || vertexCount < 290 ) { fail( `trail _vertexCount too low: ${vertexCount}` ) }
+    const [ tlon, tlat ] = trail.geometry.coordinates[ 0 ]
+    if( !( tlon > 5 && tlon < 16 && tlat > 47 && tlat < 56 ) ) { fail( `trail coords not lon-first/in DE: [${tlon}, ${tlat}]` ) }
+    if( typeof trail.properties.licence !== 'string' || trail.properties.licence.length === 0 ) { fail( 'trail missing licence' ) }
+    ok( `getTrails LineString verified: "${trail.properties.name}" _vertexCount=${vertexCount}, first=[${tlon}, ${tlat}]` )
+
+    // 5) enrich:'transit' (PRD-002) — DHID-join in a dense urban bbox (Munich).
+    //    Some features should carry _nearestTransitStop { dhid, walkingDistance }.
+    const enriched = await DztDefaultMethods.nearPoint( {
+        lat: 48.1374, lon: 11.5755, radiusMeters: 2500, enrich: [ 'transit' ], limit: 25
+    } )
+    const withStop = enriched.features.filter( ( f ) => f.properties._nearestTransitStop !== undefined )
+    if( withStop.length === 0 ) { fail( 'enrich:transit attached no _nearestTransitStop to any feature' ) }
+    const sample = withStop[ 0 ].properties._nearestTransitStop
+    if( !/^de:\d+:\d+/.test( sample.dhid ) ) { fail( `_nearestTransitStop.dhid not a DHID: ${sample.dhid}` ) }
+    if( typeof sample.walkingDistance !== 'number' ) { fail( '_nearestTransitStop.walkingDistance not numeric' ) }
+    ok( `enrich:transit attached _nearestTransitStop to ${withStop.length}/${enriched.features.length} features; sample dhid=${sample.dhid} walk=${sample.walkingDistance}m` )
 
     console.log( '\nLIVE DZT TEST PASSED' )
     process.exit( 0 )

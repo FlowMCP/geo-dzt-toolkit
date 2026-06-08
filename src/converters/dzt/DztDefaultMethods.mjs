@@ -25,6 +25,7 @@ const METHOD_CATALOG = [
             lon:          { type: 'number',  required: true,  description: 'Center longitude (WGS84)' },
             radiusMeters: { type: 'number',  required: true,  description: 'Search radius in METERS (max 50000)' },
             types:        { type: 'array',   required: false, description: 'schema.org type names to restrict to (e.g. TouristAttraction, Event)' },
+            enrich:       { type: 'array',   required: false, description: "Optional enrichments; only 'transit' is allowed (adds _nearestTransitStop with DHID + walking distance)" },
             limit:        { type: 'integer', required: false, default: 50, description: 'Max results after circle-trim' }
         }
     },
@@ -46,7 +47,15 @@ const METHOD_CATALOG = [
             lon:          { type: 'number',  required: true,  description: 'Center longitude (WGS84)' },
             radiusMeters: { type: 'number',  required: true,  description: 'Search radius in METERS (max 50000)' },
             types:        { type: 'array',   required: true,  description: 'schema.org type names (at least one, e.g. Event)' },
+            enrich:       { type: 'array',   required: false, description: "Optional enrichments; only 'transit' is allowed (adds _nearestTransitStop with DHID + walking distance)" },
             limit:        { type: 'integer', required: false, default: 50, description: 'Max results after circle-trim' }
+        }
+    },
+    {
+        name: 'getTrails',
+        params: {
+            name:  { type: 'string',  required: false, description: 'Optional case-insensitive substring matched against the trail name (schema:name)' },
+            limit: { type: 'integer', required: true,  description: 'Max trails (bounded — the graph has no spatial index, unbounded scans time out)' }
         }
     },
     {
@@ -79,20 +88,34 @@ export class DztDefaultMethods {
     }
 
 
-    static async nearPoint( { lat, lon, radiusMeters, types = null, limit = 50 } ) {
+    static async nearPoint( { lat, lon, radiusMeters, types = null, enrich = null, limit = 50 } ) {
         DztDefaultMethods.#assert( { struct: Validation.coordinate( { lat, lon } ) } )
         DztDefaultMethods.#assert( { struct: Validation.radiusMeters( { radiusMeters, maxRadiusMeters: MAX_RADIUS_METERS } ) } )
         DztDefaultMethods.#assert( { struct: Validation.types( { types } ) } )
+        DztDefaultMethods.#assertEnrich( { enrich } )
 
         const bbox = DztSparqlBuilder.bboxFromRadius( { lat, lon, radiusMeters } )
         const fetchLimit = DztDefaultMethods.#fetchLimit( { limit } )
-        const { sparql } = DztSparqlBuilder.buildBboxQuery( { ...bbox, types, limit: fetchLimit } )
+        const { sparql } = DztSparqlBuilder.buildBboxQuery( { ...bbox, types, enrich, limit: fetchLimit } )
         const { bindings, meta } = await DztClient.sparql( { query: sparql } )
         const fc = FeatureNormalizer.toFeatureCollection( {
             bindings, licence: meta.attribution, center: { lat, lon },
             maxDistanceMeters: radiusMeters, limit
         } )
         return { ...fc, meta: { ...fc.meta, fromCache: meta.fromCache, radiusMeters } }
+    }
+
+
+    static async getTrails( { name = null, limit } ) {
+        if( typeof limit !== 'number' || limit <= 0 ) {
+            throw new Error( 'DDM-002: limit is required and must be a positive number (no silent default)' )
+        }
+        const { sparql } = DztSparqlBuilder.buildTrailQuery( { name, limit } )
+        const { bindings, meta } = await DztClient.sparql( { query: sparql } )
+        const fc = FeatureNormalizer.toLineStringFeatureCollection( {
+            bindings, licence: meta.attribution, limit
+        } )
+        return { ...fc, meta: { ...fc.meta, fromCache: meta.fromCache } }
     }
 
 
@@ -110,11 +133,11 @@ export class DztDefaultMethods {
     }
 
 
-    static async byType( { lat, lon, radiusMeters, types, limit = 50 } ) {
+    static async byType( { lat, lon, radiusMeters, types, enrich = null, limit = 50 } ) {
         if( !Array.isArray( types ) || types.length === 0 ) {
             throw new Error( 'DDM-001: types is required and must contain at least one schema.org type (no silent default)' )
         }
-        return DztDefaultMethods.nearPoint( { lat, lon, radiusMeters, types, limit } )
+        return DztDefaultMethods.nearPoint( { lat, lon, radiusMeters, types, enrich, limit } )
     }
 
 
@@ -178,6 +201,27 @@ export class DztDefaultMethods {
         if( wanted < 20 ) { return 20 }
         if( wanted > 200 ) { return 200 }
         return wanted
+    }
+
+
+    static #assertEnrich( { enrich } ) {
+        // No silent default: enrich is optional, but every token given must be a
+        // known enrichment. Only 'transit' is supported; an unknown token throws
+        // rather than being silently dropped.
+        if( enrich === undefined || enrich === null ) { return { ok: true } }
+        const tokens = Array.isArray( enrich )
+            ? enrich.map( ( token ) => String( token ).trim() ).filter( ( token ) => token.length > 0 )
+            : ( typeof enrich === 'string'
+                ? enrich.split( ',' ).map( ( token ) => token.trim() ).filter( ( token ) => token.length > 0 )
+                : null )
+        if( tokens === null ) {
+            throw new Error( 'DDM-ENRICH-001: enrich must be an array or comma-separated string of enrichment tokens' )
+        }
+        const unknown = tokens.filter( ( token ) => token !== 'transit' )
+        if( unknown.length > 0 ) {
+            throw new Error( `DDM-ENRICH-002: unknown enrich token(s): ${unknown.join( ', ' )} (only 'transit' is allowed)` )
+        }
+        return { ok: true }
     }
 
 

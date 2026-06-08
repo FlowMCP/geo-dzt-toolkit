@@ -67,7 +67,8 @@ export class FeatureNormalizer {
                         lat: FeatureNormalizer.#val( { cell: binding.lat } ),
                         lon: FeatureNormalizer.#val( { cell: binding.lon } ),
                         types: FeatureNormalizer.#collect( { value: FeatureNormalizer.#val( { cell: binding.type } ) }, [] ),
-                        licence: FeatureNormalizer.#val( { cell: binding.licence } )
+                        licence: FeatureNormalizer.#val( { cell: binding.licence } ),
+                        transitStops: FeatureNormalizer.#collectStop( { binding }, [] )
                     } )
                     return
                 }
@@ -75,8 +76,36 @@ export class FeatureNormalizer {
                 if( existing.licence === null ) {
                     existing.licence = FeatureNormalizer.#val( { cell: binding.licence } )
                 }
+                existing.transitStops = FeatureNormalizer.#collectStop( { binding }, existing.transitStops )
             } )
         return map
+    }
+
+
+    static #collectStop( { binding }, existing ) {
+        // PRD-002: a POI can carry many GeoLinkObjects (one row each). Gather every
+        // candidate transit stop (dhid + walking distance); the nearest is chosen
+        // later. A row without a dhid contributes nothing (no null junk).
+        const dhid = FeatureNormalizer.#val( { cell: binding.dhid } )
+        if( dhid === null ) { return existing }
+        const walkDist = FeatureNormalizer.#parseNumber( { text: FeatureNormalizer.#val( { cell: binding.walkDist } ) } )
+        const alreadyHas = existing.some( ( stop ) => stop.dhid === dhid )
+        if( alreadyHas ) { return existing }
+        return [ ...existing, { dhid, walkingDistance: walkDist } ]
+    }
+
+
+    static #nearestStop( { transitStops } ) {
+        // Pick the stop with the smallest walking distance. Stops without a numeric
+        // distance rank last (a known stop is still better than none).
+        if( transitStops.length === 0 ) { return null }
+        const ranked = [ ...transitStops ]
+            .sort( ( a, b ) => {
+                const da = a.walkingDistance === null ? Number.POSITIVE_INFINITY : a.walkingDistance
+                const db = b.walkingDistance === null ? Number.POSITIVE_INFINITY : b.walkingDistance
+                return da - db
+            } )
+        return ranked[ 0 ]
     }
 
 
@@ -97,11 +126,95 @@ export class FeatureNormalizer {
                 lat1: center.lat, lon1: center.lon, lat2: lat, lon2: lon
             } )
         }
+        const nearestStop = FeatureNormalizer.#nearestStop( { transitStops: row.transitStops === undefined ? [] : row.transitStops } )
+        if( nearestStop !== null ) {
+            properties._nearestTransitStop = { dhid: nearestStop.dhid, walkingDistance: nearestStop.walkingDistance }
+        }
         return {
             type: 'Feature',
             geometry: { type: 'Point', coordinates: [ lon, lat ] },
             properties
         }
+    }
+
+
+    static toLineStringFeatureCollection( { bindings, licence, limit = null } ) {
+        // PRD-001: turn odta:Trail routes into GeoJSON LineString features. Each
+        // ?line is ONE whitespace-separated string of `lon,lat,elev` triples
+        // (already lon-first, elev always 0 in the feed -> dropped, 2D output).
+        // Features with fewer than 2 valid points are dropped (not a LineString).
+        // The licence contract is preserved: never ship a feature without licence.
+        if( !Array.isArray( bindings ) ) {
+            throw new Error( 'NORM-001: bindings must be an array' )
+        }
+        if( typeof licence !== 'string' || licence.length === 0 ) {
+            throw new Error( 'NORM-002: licence (attribution fallback) is required — no feature may ship without it' )
+        }
+
+        const bySubject = FeatureNormalizer.#dedupeTrailBySubject( { bindings } )
+        const features = [ ...bySubject.values() ]
+            .map( ( row ) => FeatureNormalizer.#toLineStringFeature( { row, licence } ) )
+            .filter( ( feature ) => feature !== null )
+
+        const sliced = limit === null ? features : features.slice( 0, limit )
+
+        return {
+            type: 'FeatureCollection',
+            features: sliced,
+            meta: { count: sliced.length, source: SOURCE, licence }
+        }
+    }
+
+
+    static #dedupeTrailBySubject( { bindings } ) {
+        const map = new Map()
+        bindings
+            .forEach( ( binding ) => {
+                const subject = FeatureNormalizer.#val( { cell: binding.s } )
+                if( subject === null ) { return }
+                if( map.has( subject ) ) { return }
+                map.set( subject, {
+                    uri: subject,
+                    name: FeatureNormalizer.#val( { cell: binding.name } ),
+                    line: FeatureNormalizer.#val( { cell: binding.line } ),
+                    licence: FeatureNormalizer.#val( { cell: binding.licence } )
+                } )
+            } )
+        return map
+    }
+
+
+    static #toLineStringFeature( { row, licence } ) {
+        const coordinates = FeatureNormalizer.#parseLine( { line: row.line } )
+        if( coordinates.length < 2 ) { return null }
+        return {
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates },
+            properties: {
+                uri: row.uri,
+                name: row.name === undefined ? null : row.name,
+                type: [ 'Trail' ],
+                _source: SOURCE,
+                licence: ( typeof row.licence === 'string' && row.licence.length > 0 ) ? row.licence : licence,
+                _vertexCount: coordinates.length
+            }
+        }
+    }
+
+
+    static #parseLine( { line } ) {
+        if( typeof line !== 'string' || line.trim().length === 0 ) { return [] }
+        return line
+            .trim()
+            .split( /\s+/ )
+            .map( ( token ) => {
+                const parts = token.split( ',' )
+                const lon = FeatureNormalizer.#parseNumber( { text: parts[ 0 ] } )
+                const lat = FeatureNormalizer.#parseNumber( { text: parts[ 1 ] } )
+                if( lon === null || lat === null ) { return null }
+                return [ lon, lat ]
+            } )
+            .filter( ( point ) => point !== null )
     }
 
 
